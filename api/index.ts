@@ -8,8 +8,13 @@ const origins = (process.env.ORIGIN ?? "")
 
 const io = new Server({
   cors: {
-    origin: origins
-  }
+    origin: origins,
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  // Slightly relax timeouts to avoid flaky reconnects on dev
+  pingTimeout: 30000,
+  pingInterval: 25000
 });
 
 const port = Number(process.env.PORT ?? 3000);
@@ -25,6 +30,8 @@ type ChatMessagePayload = {
 };
 
 let onlineUsers: OnlineUser[] = [];
+// Track the host socket per meeting room (simple heuristic: first join becomes host)
+const roomHost: Map<string, string> = new Map();
 
 io.on("connection", (socket: Socket) => {
   onlineUsers.push({ socketId: socket.id, userId: "" });
@@ -84,9 +91,72 @@ io.on("connection", (socket: Socket) => {
     );
   });
 
+  // --- WebRTC signaling ---
+  socket.on('rtc:join', ({ room }: { room: string }) => {
+    if (!room) return;
+    socket.join(room);
+    if (!roomHost.has(room)) {
+      roomHost.set(room, socket.id);
+    }
+    socket.to(room).emit('rtc:joined', { from: socket.id });
+  });
+
+  socket.on('rtc:leave', ({ room }: { room: string }) => {
+    if (!room) return;
+    socket.leave(room);
+    socket.to(room).emit('rtc:left', { from: socket.id });
+  });
+
+  socket.on('rtc:offer', ({ room, to, offer }: { room: string; to: string; offer: any }) => {
+    if (!room || !to || !offer) return;
+    socket.to(to).emit('rtc:offer', { from: socket.id, offer });
+  });
+
+  socket.on('rtc:answer', ({ room, to, answer }: { room: string; to: string; answer: any }) => {
+    if (!room || !to || !answer) return;
+    socket.to(to).emit('rtc:answer', { from: socket.id, answer });
+  });
+
+  socket.on('rtc:ice', ({ room, to, candidate }: { room: string; to: string; candidate: any }) => {
+    if (!room || !to || !candidate) return;
+    socket.to(to).emit('rtc:ice', { from: socket.id, candidate });
+  });
+
+  // End meeting only allowed by host
+  socket.on('meeting:end', ({ room }: { room: string }) => {
+    if (!room) return;
+    const hostId = roomHost.get(room);
+    if (hostId && hostId === socket.id) {
+      io.to(room).emit('meeting:ended');
+      // Optionally clear room state
+      roomHost.delete(room);
+      // Disconnect all sockets from the room
+      const clients = io.sockets.adapter.rooms.get(room);
+      if (clients) {
+        for (const clientId of clients) {
+          const s = io.sockets.sockets.get(clientId);
+          s?.leave(room);
+        }
+      }
+    } else {
+      // Non-hosts cannot end; they can leave only
+      socket.emit('meeting:end:denied');
+    }
+  });
+
+  socket.on('meeting:leave', ({ room }: { room: string }) => {
+    if (!room) return;
+    socket.leave(room);
+    socket.to(room).emit('rtc:left', { from: socket.id });
+  });
+
   socket.on("disconnect", () => {
     onlineUsers = onlineUsers.filter(user => user.socketId !== socket.id);
     io.emit("usersOnline", onlineUsers);
+    // Clean up host mapping if host disconnects
+    for (const [room, hostId] of roomHost.entries()) {
+      if (hostId === socket.id) roomHost.delete(room);
+    }
     console.log(
       "A user disconnected with id: ",
       socket.id,
