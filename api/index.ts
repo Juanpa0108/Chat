@@ -6,9 +6,32 @@ const origins = (process.env.ORIGIN ?? "")
   .map(s => s.trim())
   .filter(Boolean);
 
+function isAllowedOrigin(requestOrigin?: string | null): boolean {
+  if (!requestOrigin) return true; // allow same-origin or server-side calls
+  if (origins.length === 0) return true;
+  for (const rule of origins) {
+    if (rule === "*") return true;
+    if (rule.includes("*")) {
+      // simple wildcard matcher: https://*.netlify.app
+      const escaped = rule.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*");
+      const re = new RegExp(`^${escaped}$`);
+      if (re.test(requestOrigin)) return true;
+    } else if (requestOrigin === rule) {
+      return true;
+    } else if (rule.endsWith(".netlify.app") && requestOrigin.endsWith(".netlify.app")) {
+      // allow any netlify.app subdomain if rule targets that host root
+      return true;
+    }
+  }
+  return false;
+}
+
 const io = new Server({
   cors: {
-    origin: origins,
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) callback(null, true);
+      else callback(new Error("Not allowed by CORS"));
+    },
     methods: ["GET", "POST"],
     credentials: true
   },
