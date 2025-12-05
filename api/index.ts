@@ -1,5 +1,7 @@
 import { Server, type Socket } from "socket.io";
 import "dotenv/config";
+import express from "express";
+import http from "http";
 
 const origins = (process.env.ORIGIN ?? "")
   .split(",")
@@ -26,24 +28,24 @@ function isAllowedOrigin(requestOrigin?: string | null): boolean {
   return false;
 }
 
-const io = new Server({
+const app = express();
+const server = http.createServer(app);
+
+const io = new Server(server, {
   cors: {
-    origin: (origin, callback) => {
-      if (isAllowedOrigin(origin)) callback(null, true);
-      else callback(new Error("Not allowed by CORS"));
-    },
+    origin: "*",  // 👈 permite cualquier origen
     methods: ["GET", "POST"],
-    credentials: true
+    credentials: false
   },
-  // Slightly relax timeouts to avoid flaky reconnects on dev
   pingTimeout: 30000,
   pingInterval: 25000
 });
 
 const port = Number(process.env.PORT ?? 3000);
 
-io.listen(port);
-console.log(`Server is running on port ${port}`);
+server.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
 
 type OnlineUser = { socketId: string; userId: string };
 type ChatMessagePayload = {
